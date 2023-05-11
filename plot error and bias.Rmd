@@ -1,0 +1,508 @@
+---
+title: "Untitled"
+output: html_document
+date: "2023-03-15"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(foreach)
+library(tidyverse)
+library(viridis)
+library(Hmisc)
+
+bbtheme <- theme(axis.text.x = element_text(size=12,face = "bold"),
+                 axis.text.y = element_text(size=12, face = "bold"),
+                 axis.title.x = element_text(size=20, face = "bold"),
+                 axis.title.y = element_text(size=20, face = "bold"),
+                 plot.title = element_text(size=20, face = "bold"))
+```
+
+```{r}
+
+filenames = list.files("./plot_data")
+
+final_data = foreach(i = filenames, .combine = "rbind") %do% {
+  x = readRDS(paste0("./plot_data/",i))
+  data = foreach (number = 1:length(x), .combine = "rbind") %do% {
+    if (grepl("impute", i)) {output = x[[number]]$error} else {output = rbind(x[[number]]$error_si, x[[number]]$error)}
+    percent_name = str_split(i, "_")
+    output$mechanism = percent_name[[1]][6]
+    output$percent_missing = percent_name[[1]][8]
+    #output$true_number = x[[number]]$true_number
+    #output$total_pos = x[[number]]$total_pos
+    #output$false_pos = x[[number]]$false_pos
+    output$genes = percent_name[[1]][13]
+    output$sample_size = percent_name[[1]][15]
+    output$correlation = percent_name[[1]][11]
+    output
+  }
+}
+final_data[is.na(final_data)] <-0
+
+final_data_syn = final_data %>% group_by(Method, Predictor, percent_missing, mechanism, sample_size) %>% 
+  mutate(false_pos_ratio = 100*false_pos_ratio,
+         prop_true_identifed = 100*prop_true_identifed) %>% 
+  summarise(false_pos_ratio_mean = mean(false_pos_ratio),
+            prop_true_identifed_mean = mean(prop_true_identifed),
+            false_sd = sd(false_pos_ratio),
+            true_sd = sd(prop_true_identifed),
+            n = n(),
+            false_se = false_sd/sqrt(n),
+            true_se = true_sd/sqrt(n)) %>% 
+  mutate(false_lower = false_pos_ratio_mean - false_se,
+         false_upper = false_pos_ratio_mean + false_se,
+         true_lower = prop_true_identifed_mean - true_se,
+         true_upper = prop_true_identifed_mean + true_se) %>% 
+  mutate(percent_missing = as.numeric(percent_missing)) %>% 
+  mutate(Data = "Synthetic")
+
+
+
+mar_pos = final_data_syn  %>% filter(mechanism == "MAR") %>% 
+  dplyr::rename(value = prop_true_identifed_mean,
+                value_lower = true_lower,
+                value_upper = true_upper) %>% 
+  mutate(Legend = "True positives")
+
+mar_neg = final_data_syn  %>% filter(mechanism == "MAR") %>% 
+  dplyr::rename(value = false_pos_ratio_mean,
+                value_lower = false_lower,
+                value_upper = false_upper)%>% 
+  mutate(Legend = "False discovery rate")
+  
+final_data_MAR = mar_pos %>% rbind(mar_neg)%>% 
+  mutate(sample_size = factor(sample_size, levels = c("50", "100", "200", "500")))
+
+mcar_pos = final_data_syn  %>% filter(mechanism == "MCAR") %>% 
+  dplyr::rename(value = prop_true_identifed_mean,
+                value_lower = true_lower,
+                value_upper = true_upper) %>% 
+  mutate(Legend = "True positives")
+
+mcar_neg = final_data_syn  %>% filter(mechanism == "MCAR") %>% 
+  dplyr::rename(value = false_pos_ratio_mean,
+                value_lower = false_lower,
+                value_upper = false_upper)%>% 
+  mutate(Legend = "False discovery rate")
+  
+final_data_MCAR = mcar_pos %>% rbind(mcar_neg) %>% 
+  mutate(sample_size = factor(sample_size, levels = c("50", "100", "200", "500")))
+
+# To get ranges
+final_data_MAR %>% filter(Method == "RNAseqCovarImpute") %>% filter(sample_size == 500) %>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MAR %>% filter(Method == "Single imputation") %>% filter(sample_size == 500)%>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MAR %>% filter(Method == "Complete case")%>% filter(sample_size == 500) %>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MAR %>% filter(Method == "RNAseqCovarImpute")%>% filter(sample_size == 500) %>% pull(false_pos_ratio_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MAR %>% filter(Method == "Single imputation")%>% filter(sample_size == 500) %>% pull(false_pos_ratio_mean) %>% range(na.rm = T) %>% round(1)
+
+final_data_MAR %>% filter(Method == "Complete case")%>% filter(sample_size == 500) %>% pull(false_pos_ratio_mean) %>% range(na.rm = T) %>% round(1)
+
+
+final_data_MCAR %>% filter(Method == "RNAseqCovarImpute")%>% filter(sample_size == 500) %>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MCAR %>% filter(Method == "Single imputation")%>% filter(sample_size == 500) %>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MCAR %>% filter(Method == "Complete case") %>% filter(sample_size == 500)%>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MCAR %>% filter(Method == "RNAseqCovarImpute") %>% filter(sample_size == 500)%>% pull(false_pos_ratio_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MCAR %>% filter(Method == "Single imputation") %>% filter(sample_size == 500)%>% pull(false_pos_ratio_mean) %>% range(na.rm = T) %>% round(1)
+
+final_data_MCAR %>% filter(Method == "Complete case") %>% filter(sample_size == 500)%>% pull(false_pos_ratio_mean) %>% range(na.rm = T) %>% round(1)
+
+
+##########
+############################
+#############################
+############
+
+# To get ranges sample size 50
+final_data_MAR %>% filter(Method == "RNAseqCovarImpute") %>% filter(sample_size == 50) %>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MAR %>% filter(Method == "Single imputation") %>% filter(sample_size == 50)%>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MAR %>% filter(Method == "Complete case")%>% filter(sample_size == 50) %>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MAR %>% filter(Method == "RNAseqCovarImpute")%>% filter(sample_size == 50) %>% pull(false_pos_ratio_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MAR %>% filter(Method == "Single imputation")%>% filter(sample_size == 50) %>% pull(false_pos_ratio_mean) %>% range(na.rm = T) %>% round(1)
+
+final_data_MAR %>% filter(Method == "Complete case")%>% filter(sample_size == 50) %>% pull(false_pos_ratio_mean) %>% range(na.rm = T) %>% round(1)
+
+
+final_data_MCAR %>% filter(Method == "RNAseqCovarImpute")%>% filter(sample_size == 50) %>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MCAR %>% filter(Method == "Single imputation")%>% filter(sample_size == 50) %>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MCAR %>% filter(Method == "Complete case") %>% filter(sample_size == 50)%>% pull(prop_true_identifed_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MCAR %>% filter(Method == "RNAseqCovarImpute") %>% filter(sample_size == 50)%>% pull(false_pos_ratio_mean) %>% range(na.rm = T)%>% round(1)
+
+final_data_MCAR %>% filter(Method == "Single imputation") %>% filter(sample_size == 50)%>% pull(false_pos_ratio_mean) %>% range(na.rm = T) %>% round(1)
+
+final_data_MCAR %>% filter(Method == "Complete case") %>% filter(sample_size == 50)%>% pull(false_pos_ratio_mean) %>% range(na.rm = T) %>% round(1)
+
+
+
+
+label(final_data_MAR$sample_size)<- "Sample Size"
+
+error_mar = ggplot(final_data_MAR, aes(x = percent_missing, y = value, color = Legend))+
+  geom_point(size = 2)+
+  geom_errorbar(aes(ymin = value_lower, ymax = value_upper), width = 2)+
+  labs(y = "(%)",
+       x = "Individuals with missing data (%)")+
+  facet_wrap(~sample_size*Method,labeller = label_both, ncol = 3)+
+  theme_bw()+
+  scale_x_continuous(breaks = c(5,15,25,35, 45,55))+
+  scale_y_continuous(breaks = c(10,30,50,70))+
+  bbtheme+
+  scale_color_viridis(discrete = T, end = .6, option = "A", direction = -1)
+
+
+error_mar
+error_mcar = ggplot(final_data_MCAR, aes(x = percent_missing, y = value, color = Legend))+
+  geom_point(size = 2)+
+  geom_errorbar(aes(ymin = value_lower, ymax = value_upper), width = 2)+
+  labs(y = "(%)",
+       x = "Individuals with missing data (%)")+
+  facet_wrap(~sample_size*Method,labeller = label_both, ncol = 3)+
+  theme_bw()+
+  scale_x_continuous(breaks = c(5,15,25,35, 45,55))+
+  scale_y_continuous(breaks = c(10,30,50,70))+
+  bbtheme+
+  scale_color_viridis(discrete = T, end = .6, option = "A", direction = -1)
+
+error_mcar  
+
+```
+
+```{r}
+filenames = list.files("./plot_data")
+
+filenames_ccsi = filenames[grepl("cc", filenames)]
+filenames_impute = filenames[grepl("impute", filenames)]
+
+
+data_ccsi = foreach(i = filenames_ccsi, .combine = "rbind") %do% {
+  x = readRDS(paste0("./plot_data/",i))
+  data = foreach (number = 1:length(x), .combine = "rbind") %do% {
+    output = x[[number]]$coefs
+    percent_name = str_split(i, "_")
+    output$mechanism = percent_name[[1]][6]
+    output$percent_missing = str_remove(percent_name[[1]][8], ".RDS")
+    output$genes = percent_name[[1]][13]
+    output$sample_size = percent_name[[1]][15]
+    output$correlation = percent_name[[1]][11]
+    output
+  }
+}
+
+data_impute = foreach(i = filenames_impute, .combine = "rbind") %do% {
+  x = readRDS(paste0("./plot_data/",i))
+  data = foreach (number = 1:length(x), .combine = "rbind") %do% {
+    output = x[[number]]$coefs
+    percent_name = str_split(i, "_")
+    output$mechanism = percent_name[[1]][6]
+    output$percent_missing = str_remove(percent_name[[1]][8], ".RDS")
+      output$genes = percent_name[[1]][13]
+    output$sample_size = percent_name[[1]][15]
+    output$correlation = percent_name[[1]][11]
+    output
+  }
+}
+
+
+data_ccsi = data_ccsi %>% filter(null == FALSE)
+data_impute = data_impute %>% filter(null == FALSE)
+
+data_impute2 = data_impute %>% 
+  mutate(bias = coef_verify - coef_combined) %>% 
+  mutate(direction = ifelse(bias>0, 1, -1)) %>% 
+  mutate(bias_percent = direction*100*(abs(bias)/abs(coef_verify))) %>% 
+  group_by(mechanism, percent_missing, ENSEMBL, sample_size) %>% 
+  summarise(mean_bias = mean(bias), sd_bias = sd(bias),
+            mean_bias_percent = mean(bias_percent), sd_bias_percent = sd(bias_percent),
+            n = n(),
+            bias_se = sd_bias/sqrt(n),
+            bias_se_percent = sd_bias_percent/sqrt(n)) %>% 
+  mutate(percent_lower = mean_bias_percent - bias_se_percent,
+         percent_upper = mean_bias_percent + bias_se_percent) %>% 
+  mutate(Method = "RNAseqCovarImpute") %>% 
+  dplyr::select(Method, mechanism, percent_missing, mean_bias_percent, percent_lower, percent_upper, sample_size)
+
+
+
+data_cc = data_ccsi %>% 
+  mutate(bias = coef_verify - logFC) %>% 
+  mutate(direction = ifelse(bias>0, 1, -1)) %>%
+  mutate(bias_percent = direction*100*(abs(bias)/abs(coef_verify))) %>% 
+  group_by(mechanism, percent_missing, ENSEMBL, sample_size) %>% 
+  summarise(mean_bias = mean(bias), sd_bias = sd(bias),
+            mean_bias_percent = mean(bias_percent), sd_bias_percent = sd(bias_percent),
+            n = n(),
+            bias_se = sd_bias/sqrt(n),
+            bias_se_percent = sd_bias_percent/sqrt(n)) %>% 
+  mutate(percent_lower = mean_bias_percent - bias_se_percent,
+         percent_upper = mean_bias_percent + bias_se_percent) %>% 
+  mutate(Method = "Complete case") %>% 
+  dplyr::select(Method, mechanism, percent_missing, mean_bias_percent, percent_lower, percent_upper, sample_size)
+
+
+data_si = data_ccsi %>% 
+  mutate(bias = coef_verify - logFC_si) %>% 
+  mutate(direction = ifelse(bias>0, 1, -1)) %>%
+  mutate(bias_percent = direction*100*(abs(bias)/abs(coef_verify))) %>% 
+  group_by(mechanism, percent_missing, ENSEMBL, sample_size) %>% 
+  summarise(mean_bias = mean(bias), sd_bias = sd(bias),
+            mean_bias_percent = mean(bias_percent), sd_bias_percent = sd(bias_percent),
+            n = n(),
+            bias_se = sd_bias/sqrt(n),
+            bias_se_percent = sd_bias_percent/sqrt(n)) %>% 
+  mutate(percent_lower = mean_bias_percent - bias_se_percent,
+         percent_upper = mean_bias_percent + bias_se_percent) %>% 
+  mutate(Method = "Single imputation") %>% 
+  dplyr::select(Method, mechanism, percent_missing, mean_bias_percent, percent_lower, percent_upper, sample_size)
+
+
+bias_data_mar = data_impute2 %>% rbind(data_cc) %>% rbind(data_si) %>% 
+  mutate(percent_missing = as.numeric(percent_missing))%>% 
+  filter(mechanism == "MAR")%>% 
+  mutate(sample_size = factor(sample_size, levels = c("50", "100", "200", "500")))
+
+bias_data_mcar = data_impute2 %>% rbind(data_cc) %>% rbind(data_si) %>% 
+  mutate(percent_missing = as.numeric(percent_missing))%>% 
+  filter(mechanism == "MCAR")%>% 
+  mutate(sample_size = factor(sample_size, levels = c("50", "100", "200", "500")))
+
+
+bias_mar = ggplot(bias_data_mar, aes(x = percent_missing, y = mean_bias_percent, group = percent_missing))+
+  geom_boxplot()+
+  #coord_cartesian(ylim = c(-50,50))+
+  labs(y = "Bias (%)",
+       x = "Individuals with missing data (%)")+
+  facet_wrap(~sample_size*Method,labeller = label_both, ncol = 3)+
+  theme_bw()+
+  scale_x_continuous(breaks = c(5,15,25,35,45, 55))+
+  bbtheme
+bias_mar
+
+bias_mcar = ggplot(bias_data_mcar, aes(x = percent_missing, y = mean_bias_percent, group = percent_missing))+
+  geom_boxplot()+
+  coord_cartesian(ylim = c(-50,50))+
+  labs(y = "Bias (%)",
+       x = "Individuals with missing data (%)")+
+  facet_wrap(~sample_size*Method,labeller = label_both, ncol = 3)+
+  theme_bw()+
+  scale_x_continuous(breaks = c(5,15,25,35,45, 55))+
+  bbtheme
+
+bias_mcar
+
+library(ggpubr)
+library(grid)
+
+
+p = ggarrange(bias_mcar+ 
+               theme(
+                     axis.title.x = element_blank(),
+                     axis.title.y = element_blank()),
+              bias_mar+ 
+               theme(
+                     axis.title.x = element_blank(),
+                     axis.title.y = element_blank()),
+          ncol = 2, nrow = 1,
+          labels = c("A", "B"),
+          legend = "right",
+          common.legend = TRUE, align = "hv")
+
+
+annotate_figure(p,
+                bottom = text_grob("Individuals with missing data (%)", size=20, face = "bold"),
+                left = text_grob("Bias (%)", size=20, face = "bold", rot = 90))
+
+
+
+
+
+
+
+
+p = ggarrange(error_mcar+ 
+               theme(
+                     axis.title.x = element_blank(),
+                     axis.title.y = element_blank()),
+              error_mar+ 
+               theme(
+                     axis.title.x = element_blank(),
+                     axis.title.y = element_blank()),
+          ncol = 2, nrow = 1,
+          labels = c("A", "B"),
+          legend = "right",
+          common.legend = TRUE, align = "hv")
+
+
+annotate_figure(p,
+                bottom = text_grob("Individuals with missing data (%)", size=20, face = "bold"),
+                left = text_grob("(%)", size=20, face = "bold", rot = 90))
+
+
+```
+
+Bias plots including genes that were simulated to be null (e.g., simulated coefficient of 0 with predictor of interest V1)
+```{r}
+filenames = list.files("./plot_data")
+
+filenames_ccsi = filenames[grepl("cc", filenames)]
+filenames_impute = filenames[grepl("impute", filenames)]
+
+
+data_ccsi = foreach(i = filenames_ccsi, .combine = "rbind") %do% {
+  x = readRDS(paste0("./plot_data/",i))
+  data = foreach (number = 1:length(x), .combine = "rbind") %do% {
+    output = x[[number]]$coefs
+    percent_name = str_split(i, "_")
+    output$mechanism = percent_name[[1]][6]
+    output$percent_missing = str_remove(percent_name[[1]][8], ".RDS")
+    output$genes = percent_name[[1]][13]
+    output$sample_size = percent_name[[1]][15]
+    output$correlation = percent_name[[1]][11]
+    output
+  }
+}
+
+data_impute = foreach(i = filenames_impute, .combine = "rbind") %do% {
+  x = readRDS(paste0("./plot_data/",i))
+  data = foreach (number = 1:length(x), .combine = "rbind") %do% {
+    output = x[[number]]$coefs
+    percent_name = str_split(i, "_")
+    output$mechanism = percent_name[[1]][6]
+    output$percent_missing = str_remove(percent_name[[1]][8], ".RDS")
+      output$genes = percent_name[[1]][13]
+    output$sample_size = percent_name[[1]][15]
+    output$correlation = percent_name[[1]][11]
+    output
+  }
+}
+
+
+
+
+data_impute2 = data_impute %>% 
+  mutate(null = ifelse(null == FALSE, "False", "True")) %>% 
+  mutate(bias = coef_verify - coef_combined) %>% 
+  mutate(direction = ifelse(bias>0, 1, -1)) %>% 
+  mutate(bias_percent = direction*100*(abs(bias)/abs(coef_verify))) %>% 
+  group_by(mechanism, percent_missing, ENSEMBL, sample_size) %>% 
+  summarise(mean_bias = mean(bias), sd_bias = sd(bias),
+            mean_bias_percent = mean(bias_percent), sd_bias_percent = sd(bias_percent),
+            n = n(),
+            bias_se = sd_bias/sqrt(n),
+            bias_se_percent = sd_bias_percent/sqrt(n),
+            null = null) %>% 
+  mutate(percent_lower = mean_bias_percent - bias_se_percent,
+         percent_upper = mean_bias_percent + bias_se_percent) %>% 
+  mutate(Method = "RNAseqCovarImpute") %>% 
+  dplyr::select(Method, mechanism, percent_missing, mean_bias_percent, percent_lower, percent_upper, sample_size, null)
+
+
+
+data_cc = data_ccsi %>% 
+  mutate(null = ifelse(null == FALSE, "False", "True")) %>% 
+  mutate(bias = coef_verify - logFC) %>% 
+  mutate(direction = ifelse(bias>0, 1, -1)) %>%
+  mutate(bias_percent = direction*100*(abs(bias)/abs(coef_verify))) %>% 
+  group_by(mechanism, percent_missing, ENSEMBL, sample_size) %>% 
+  summarise(mean_bias = mean(bias), sd_bias = sd(bias),
+            mean_bias_percent = mean(bias_percent), sd_bias_percent = sd(bias_percent),
+            n = n(),
+            bias_se = sd_bias/sqrt(n),
+            bias_se_percent = sd_bias_percent/sqrt(n),
+            null = null) %>% 
+  mutate(percent_lower = mean_bias_percent - bias_se_percent,
+         percent_upper = mean_bias_percent + bias_se_percent) %>% 
+  mutate(Method = "Complete case") %>% 
+  dplyr::select(Method, mechanism, percent_missing, mean_bias_percent, percent_lower, percent_upper, sample_size, null)
+
+
+data_si = data_ccsi %>% 
+  mutate(null = ifelse(null == FALSE, "False", "True")) %>% 
+  mutate(bias = coef_verify - logFC_si) %>% 
+  mutate(direction = ifelse(bias>0, 1, -1)) %>%
+  mutate(bias_percent = direction*100*(abs(bias)/abs(coef_verify))) %>% 
+  group_by(mechanism, percent_missing, ENSEMBL, sample_size) %>% 
+  summarise(mean_bias = mean(bias), sd_bias = sd(bias),
+            mean_bias_percent = mean(bias_percent), sd_bias_percent = sd(bias_percent),
+            n = n(),
+            bias_se = sd_bias/sqrt(n),
+            bias_se_percent = sd_bias_percent/sqrt(n),
+            null = null) %>% 
+  mutate(percent_lower = mean_bias_percent - bias_se_percent,
+         percent_upper = mean_bias_percent + bias_se_percent) %>% 
+  mutate(Method = "Single imputation") %>% 
+  dplyr::select(Method, mechanism, percent_missing, mean_bias_percent, percent_lower, percent_upper, sample_size, null)
+
+
+bias_data_mar = data_impute2 %>% rbind(data_cc) %>% rbind(data_si) %>% 
+  mutate(percent_missing = as.numeric(percent_missing))%>% 
+  filter(mechanism == "MAR")%>% 
+  mutate(sample_size = factor(sample_size, levels = c("50", "100", "200", "500")))
+
+bias_data_mcar = data_impute2 %>% rbind(data_cc) %>% rbind(data_si) %>% 
+  mutate(percent_missing = as.numeric(percent_missing))%>% 
+  filter(mechanism == "MCAR")%>% 
+  mutate(sample_size = factor(sample_size, levels = c("50", "100", "200", "500")))
+
+
+bias_mar = ggplot(bias_data_mar, aes(x = percent_missing, y = mean_bias_percent, group = percent_missing))+
+  geom_jitter(size = 0.5, shape = 1, alpha = .04)+
+  coord_cartesian(ylim = c(-50,50))+
+  labs(y = "Bias (%)",
+       x = "Individuals with missing data (%)")+
+  facet_wrap(~sample_size*Method,labeller = label_both, ncol = 3)+
+  theme_bw()+
+  scale_x_continuous(breaks = c(5,15,25,35,45, 55))+
+  bbtheme
+bias_mar
+
+bias_mcar = ggplot(bias_data_mcar, aes(x = percent_missing, y = mean_bias_percent, group = percent_missing))+
+  geom_jitter(size = 0.5, shape = 1, alpha = .04)+
+  coord_cartesian(ylim = c(-50,50))+
+  labs(y = "Bias (%)",
+       x = "Individuals with missing data (%)")+
+  facet_wrap(~sample_size*Method,labeller = label_both, ncol = 3)+
+  theme_bw()+
+  scale_x_continuous(breaks = c(5,15,25,35,45, 55))+
+  bbtheme
+
+bias_mcar
+
+library(ggpubr)
+library(grid)
+
+
+p = ggarrange(bias_mcar+ 
+               theme(
+                     axis.title.x = element_blank(),
+                     axis.title.y = element_blank()),
+              bias_mar+ 
+               theme(
+                     axis.title.x = element_blank(),
+                     axis.title.y = element_blank()),
+          ncol = 2, nrow = 1,
+          labels = c("A", "B"),
+          legend = "right",
+          common.legend = TRUE, align = "hv")
+
+
+
+annotate_figure(p,
+                bottom = text_grob("Individuals with missing data (%)", size=20, face = "bold"),
+                left = text_grob("Bias (%)", size=20, face = "bold", rot = 90))
+```

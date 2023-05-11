@@ -1,0 +1,472 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+This code was used to createsynthetic data and synthetic RNA-seq counts. Real participant counts were modified to add known signal. This code and the output are provided in this github repo, but the input participant data cannot be shared (alldg_3_vars.RDS).
+```{r}
+library(tidyverse)
+library(mice)
+library(edgeR)
+library(openxlsx)
+library(BiocStyle)
+library(xtable)
+library(tximport)
+library(Glimma)
+library(org.Hs.eg.db)
+library(doParallel)
+library(foreach)
+library(RNAseqCovarImpute)
+library(doRNG)
+library(seqgendiff)
+library(simstudy)
+library(missForest)
+set.seed(2023)
+sample_size = 500
+# Generate 5 random binary variables that are correlated with each other
+
+R = genCorMat(5, cors = c(.1,.1,.1,.1,0,0,0,0,0,0))
+
+data = genCorGen(sample_size, nvars = 5, params1 = c(0,0,0,0,0), params2 = c(1,1,1,1,1), dist = "normal", corMatrix = R, corstr = "cs", wide = TRUE)
+
+data = data %>% dplyr::select(-id)
+
+
+mat <- readRDS("./alldg_3_vars.RDS")
+mode(mat$counts)<- "integer"
+# Sample down genes to make simulations faster
+
+mat = mat[sample(1:nrow(mat),2000), ]
+
+mat = mat[,sample(1:ncol(mat),sample_size), ]
+nrow(mat)
+ncol(mat)
+
+annot = tibble(number = 1:sample_size, name1 = "Sample") %>% mutate(sample = str_c(name1,number)) %>% dplyr::select(sample)
+colnames(mat) <- annot$sample
+
+
+data_pred = data 
+
+# Generate random differential expression coefficients from gamma distribution
+#designmat = model.matrix(~0 + V1, data_pred)
+designmat = model.matrix(~0 + V1 + V2 + V3 + V4 + V5, data_pred)
+
+new_coefs <- matrix(stats::rgamma(ncol(designmat) * nrow(mat), shape = 1, rate = 3),
+                  ncol = ncol(designmat),
+                  nrow = nrow(mat))
+
+plot(density(new_coefs))
+
+nullvec <- sample(x = c(TRUE, FALSE),
+                  size = nrow(new_coefs),
+                  replace = TRUE,
+                  prob = c(0.825, 0.175))
+new_coefs[nullvec, 1] <- 0
+
+# Use binomial thinning method to modify synthetic count matrix to closely match to our desired random coefficients above
+
+thout <- thin_diff(mat          = mat$counts, 
+                   design_fixed = designmat, 
+                   coef_fixed   = new_coefs)
+
+# Replace the count matrix in out dge list with the counts modified above
+alldg_ampute = mat
+alldg_ampute$counts <- thout$mat
+rownames(alldg_ampute) <- rownames(mat)
+colnames(alldg_ampute) <- colnames(mat)
+
+# New design that has an intercept
+new_design = model.matrix(~V1 + V2 + V3 + V4 + V5, data)
+#new_design = model.matrix(~V1 + V2 + V3, data)
+
+# Use limma-voom to get what we define as the true coefficients and true significantly differentially expressed genes
+vout <- limma::voom(alldg_ampute, design = new_design)
+lout <- limma::lmFit(vout)
+coefhat <- coef(lout)[, -1, drop = FALSE]
+eout <- eBayes(lout)
+top.table1 <- topTable(eout ,coef = "V1",sort.by = "P", n = Inf)%>% 
+  mutate(significant = ifelse(adj.P.Val<0.05, "Yes", "No"))
+
+
+true_coef_data = tibble(ENSEMBL = rownames(mat),
+                 true_coef = new_coefs[,1])
+#write_csv(true_coef_data, "true_coef_data.csv")
+
+truth_res2 = tibble(ENSEMBL = rownames(top.table1),
+                 coef_verify = top.table1$logFC,
+                 significant = top.table1$significant) %>% 
+  mutate(null = significant == "No") %>% 
+   left_join(true_coef_data)
+
+
+
+truth_res2 %>% group_by(significant) %>% dplyr::summarize(n=n())
+
+adj_formula = "~V1 + V2 + V3 + V4 + V5"
+#adj_formula = "~V1 + V2 + V3"
+# pattern to allow one row to have multiple missing variables. First get all combos of 0 or 1 for the 2 variables
+pattern_vars = expand.grid(0:1, 0:1, 0:1, 0:1)
+# then add back the predictor of interest, which is never amputed, so the first col =1 the whole way down
+pattern2 = matrix(1, nrow = nrow(pattern_vars), ncol = 1)
+pattern1 = cbind(pattern2, pattern_vars)
+#remove last row which is all 1s (all 1s means no missingness induced)
+pattern1 = pattern1[1:15,]
+mat = alldg_ampute
+
+
+saveRDS(alldg_ampute, "alldg_ampute500.RDS")
+saveRDS(data, "data500.RDS")
+saveRDS(new_coefs, "new_coefs500.RDS")
+
+```
+
+200
+```{r}
+library(tidyverse)
+library(mice)
+library(edgeR)
+library(openxlsx)
+library(BiocStyle)
+library(xtable)
+library(tximport)
+library(Glimma)
+library(org.Hs.eg.db)
+library(doParallel)
+library(foreach)
+library(RNAseqCovarImpute)
+library(doRNG)
+library(seqgendiff)
+library(simstudy)
+library(missForest)
+set.seed(2023)
+sample_size = 200
+# Generate 5 random binary variables that are correlated with each other
+
+R = genCorMat(5, cors = c(.1,.1,.1,.1,0,0,0,0,0,0))
+
+data = genCorGen(sample_size, nvars = 5, params1 = c(0,0,0,0,0), params2 = c(1,1,1,1,1), dist = "normal", corMatrix = R, corstr = "cs", wide = TRUE)
+
+data = data %>% dplyr::select(-id)
+
+
+mat <- readRDS("./alldg_3_vars.RDS")
+mode(mat$counts)<- "integer"
+# Sample down genes to make simulations faster
+
+mat = mat[sample(1:nrow(mat),2000), ]
+
+mat = mat[,sample(1:ncol(mat),sample_size), ]
+nrow(mat)
+ncol(mat)
+
+annot = tibble(number = 1:sample_size, name1 = "Sample") %>% mutate(sample = str_c(name1,number)) %>% dplyr::select(sample)
+colnames(mat) <- annot$sample
+
+
+data_pred = data 
+
+# Generate random differential expression coefficients from gamma distribution
+#designmat = model.matrix(~0 + V1, data_pred)
+designmat = model.matrix(~0 + V1 + V2 + V3 + V4 + V5, data_pred)
+
+new_coefs <- matrix(stats::rgamma(ncol(designmat) * nrow(mat), shape = 1, rate = 3),
+                  ncol = ncol(designmat),
+                  nrow = nrow(mat))
+
+plot(density(new_coefs))
+
+nullvec <- sample(x = c(TRUE, FALSE),
+                  size = nrow(new_coefs),
+                  replace = TRUE,
+                  prob = c(0.825, 0.175))
+new_coefs[nullvec, 1] <- 0
+
+# Use binomial thinning method to modify synthetic count matrix to closely match to our desired random coefficients above
+
+thout <- thin_diff(mat          = mat$counts, 
+                   design_fixed = designmat, 
+                   coef_fixed   = new_coefs)
+
+# Replace the count matrix in out dge list with the counts modified above
+alldg_ampute = mat
+alldg_ampute$counts <- thout$mat
+rownames(alldg_ampute) <- rownames(mat)
+colnames(alldg_ampute) <- colnames(mat)
+
+# New design that has an intercept
+new_design = model.matrix(~V1 + V2 + V3 + V4 + V5, data)
+#new_design = model.matrix(~V1 + V2 + V3, data)
+
+# Use limma-voom to get what we define as the true coefficients and true significantly differentially expressed genes
+vout <- limma::voom(alldg_ampute, design = new_design)
+lout <- limma::lmFit(vout)
+coefhat <- coef(lout)[, -1, drop = FALSE]
+eout <- eBayes(lout)
+top.table1 <- topTable(eout ,coef = "V1",sort.by = "P", n = Inf)%>% 
+  mutate(significant = ifelse(adj.P.Val<0.05, "Yes", "No"))
+
+
+true_coef_data = tibble(ENSEMBL = rownames(mat),
+                 true_coef = new_coefs[,1])
+#write_csv(true_coef_data, "true_coef_data.csv")
+
+truth_res2 = tibble(ENSEMBL = rownames(top.table1),
+                 coef_verify = top.table1$logFC,
+                 significant = top.table1$significant) %>% 
+  mutate(null = significant == "No") %>% 
+   left_join(true_coef_data)
+
+
+
+truth_res2 %>% group_by(significant) %>% dplyr::summarize(n=n())
+
+adj_formula = "~V1 + V2 + V3 + V4 + V5"
+#adj_formula = "~V1 + V2 + V3"
+# pattern to allow one row to have multiple missing variables. First get all combos of 0 or 1 for the 2 variables
+pattern_vars = expand.grid(0:1, 0:1, 0:1, 0:1)
+# then add back the predictor of interest, which is never amputed, so the first col =1 the whole way down
+pattern2 = matrix(1, nrow = nrow(pattern_vars), ncol = 1)
+pattern1 = cbind(pattern2, pattern_vars)
+#remove last row which is all 1s (all 1s means no missingness induced)
+pattern1 = pattern1[1:15,]
+mat = alldg_ampute
+
+saveRDS(alldg_ampute, "alldg_ampute200.RDS")
+saveRDS(data, "data200.RDS")
+saveRDS(new_coefs, "new_coefs200.RDS")
+```
+
+```{r}
+library(tidyverse)
+library(mice)
+library(edgeR)
+library(openxlsx)
+library(BiocStyle)
+library(xtable)
+library(tximport)
+library(Glimma)
+library(org.Hs.eg.db)
+library(doParallel)
+library(foreach)
+library(RNAseqCovarImpute)
+library(doRNG)
+library(seqgendiff)
+library(simstudy)
+library(missForest)
+set.seed(2023)
+sample_size = 100
+# Generate 5 random binary variables that are correlated with each other
+
+R = genCorMat(5, cors = c(.1,.1,.1,.1,0,0,0,0,0,0))
+
+data = genCorGen(sample_size, nvars = 5, params1 = c(0,0,0,0,0), params2 = c(1,1,1,1,1), dist = "normal", corMatrix = R, corstr = "cs", wide = TRUE)
+
+data = data %>% dplyr::select(-id)
+
+
+mat <- readRDS("./alldg_3_vars.RDS")
+mode(mat$counts)<- "integer"
+# Sample down genes to make simulations faster
+
+mat = mat[sample(1:nrow(mat),2000), ]
+
+mat = mat[,sample(1:ncol(mat),sample_size), ]
+nrow(mat)
+ncol(mat)
+
+annot = tibble(number = 1:sample_size, name1 = "Sample") %>% mutate(sample = str_c(name1,number)) %>% dplyr::select(sample)
+colnames(mat) <- annot$sample
+
+
+data_pred = data 
+
+# Generate random differential expression coefficients from gamma distribution
+#designmat = model.matrix(~0 + V1, data_pred)
+designmat = model.matrix(~0 + V1 + V2 + V3 + V4 + V5, data_pred)
+
+new_coefs <- matrix(stats::rgamma(ncol(designmat) * nrow(mat), shape = 1, rate = 3),
+                  ncol = ncol(designmat),
+                  nrow = nrow(mat))
+
+plot(density(new_coefs))
+
+nullvec <- sample(x = c(TRUE, FALSE),
+                  size = nrow(new_coefs),
+                  replace = TRUE,
+                  prob = c(0.825, 0.175))
+new_coefs[nullvec, 1] <- 0
+
+# Use binomial thinning method to modify synthetic count matrix to closely match to our desired random coefficients above
+
+thout <- thin_diff(mat          = mat$counts, 
+                   design_fixed = designmat, 
+                   coef_fixed   = new_coefs)
+
+# Replace the count matrix in out dge list with the counts modified above
+alldg_ampute = mat
+alldg_ampute$counts <- thout$mat
+rownames(alldg_ampute) <- rownames(mat)
+colnames(alldg_ampute) <- colnames(mat)
+
+# New design that has an intercept
+new_design = model.matrix(~V1 + V2 + V3 + V4 + V5, data)
+#new_design = model.matrix(~V1 + V2 + V3, data)
+
+# Use limma-voom to get what we define as the true coefficients and true significantly differentially expressed genes
+vout <- limma::voom(alldg_ampute, design = new_design)
+lout <- limma::lmFit(vout)
+coefhat <- coef(lout)[, -1, drop = FALSE]
+eout <- eBayes(lout)
+top.table1 <- topTable(eout ,coef = "V1",sort.by = "P", n = Inf)%>% 
+  mutate(significant = ifelse(adj.P.Val<0.05, "Yes", "No"))
+
+
+true_coef_data = tibble(ENSEMBL = rownames(mat),
+                 true_coef = new_coefs[,1])
+#write_csv(true_coef_data, "true_coef_data.csv")
+
+truth_res2 = tibble(ENSEMBL = rownames(top.table1),
+                 coef_verify = top.table1$logFC,
+                 significant = top.table1$significant) %>% 
+  mutate(null = significant == "No") %>% 
+   left_join(true_coef_data)
+
+
+
+truth_res2 %>% group_by(significant) %>% dplyr::summarize(n=n())
+
+adj_formula = "~V1 + V2 + V3 + V4 + V5"
+#adj_formula = "~V1 + V2 + V3"
+# pattern to allow one row to have multiple missing variables. First get all combos of 0 or 1 for the 2 variables
+pattern_vars = expand.grid(0:1, 0:1, 0:1, 0:1)
+# then add back the predictor of interest, which is never amputed, so the first col =1 the whole way down
+pattern2 = matrix(1, nrow = nrow(pattern_vars), ncol = 1)
+pattern1 = cbind(pattern2, pattern_vars)
+#remove last row which is all 1s (all 1s means no missingness induced)
+pattern1 = pattern1[1:15,]
+mat = alldg_ampute
+
+
+saveRDS(alldg_ampute, "alldg_ampute100.RDS")
+saveRDS(data, "data100.RDS")
+saveRDS(new_coefs, "new_coefs100.RDS")
+```
+
+50
+```{r}
+library(tidyverse)
+library(mice)
+library(edgeR)
+library(openxlsx)
+library(BiocStyle)
+library(xtable)
+library(tximport)
+library(Glimma)
+library(org.Hs.eg.db)
+library(doParallel)
+library(foreach)
+library(RNAseqCovarImpute)
+library(doRNG)
+library(seqgendiff)
+library(simstudy)
+library(missForest)
+set.seed(2023)
+sample_size = 50
+# Generate 5 random binary variables that are correlated with each other
+
+R = genCorMat(5, cors = c(.1,.1,.1,.1,0,0,0,0,0,0))
+
+data = genCorGen(sample_size, nvars = 5, params1 = c(0,0,0,0,0), params2 = c(1,1,1,1,1), dist = "normal", corMatrix = R, corstr = "cs", wide = TRUE)
+
+data = data %>% dplyr::select(-id)
+
+
+mat <- readRDS("./alldg_3_vars.RDS")
+mode(mat$counts)<- "integer"
+# Sample down genes to make simulations faster
+
+mat = mat[sample(1:nrow(mat),2000), ]
+
+mat = mat[,sample(1:ncol(mat),sample_size), ]
+nrow(mat)
+ncol(mat)
+
+annot = tibble(number = 1:sample_size, name1 = "Sample") %>% mutate(sample = str_c(name1,number)) %>% dplyr::select(sample)
+colnames(mat) <- annot$sample
+
+
+data_pred = data 
+
+# Generate random differential expression coefficients from gamma distribution
+#designmat = model.matrix(~0 + V1, data_pred)
+designmat = model.matrix(~0 + V1 + V2 + V3 + V4 + V5, data_pred)
+
+new_coefs <- matrix(stats::rgamma(ncol(designmat) * nrow(mat), shape = 1, rate = 3),
+                  ncol = ncol(designmat),
+                  nrow = nrow(mat))
+
+plot(density(new_coefs))
+
+nullvec <- sample(x = c(TRUE, FALSE),
+                  size = nrow(new_coefs),
+                  replace = TRUE,
+                  prob = c(0.825, 0.175))
+new_coefs[nullvec, 1] <- 0
+
+# Use binomial thinning method to modify synthetic count matrix to closely match to our desired random coefficients above
+
+thout <- thin_diff(mat          = mat$counts, 
+                   design_fixed = designmat, 
+                   coef_fixed   = new_coefs)
+
+# Replace the count matrix in out dge list with the counts modified above
+alldg_ampute = mat
+alldg_ampute$counts <- thout$mat
+rownames(alldg_ampute) <- rownames(mat)
+colnames(alldg_ampute) <- colnames(mat)
+
+# New design that has an intercept
+new_design = model.matrix(~V1 + V2 + V3 + V4 + V5, data)
+#new_design = model.matrix(~V1 + V2 + V3, data)
+
+# Use limma-voom to get what we define as the true coefficients and true significantly differentially expressed genes
+vout <- limma::voom(alldg_ampute, design = new_design)
+lout <- limma::lmFit(vout)
+coefhat <- coef(lout)[, -1, drop = FALSE]
+eout <- eBayes(lout)
+top.table1 <- topTable(eout ,coef = "V1",sort.by = "P", n = Inf)%>% 
+  mutate(significant = ifelse(adj.P.Val<0.05, "Yes", "No"))
+
+
+true_coef_data = tibble(ENSEMBL = rownames(mat),
+                 true_coef = new_coefs[,1])
+#write_csv(true_coef_data, "true_coef_data.csv")
+
+truth_res2 = tibble(ENSEMBL = rownames(top.table1),
+                 coef_verify = top.table1$logFC,
+                 significant = top.table1$significant) %>% 
+  mutate(null = significant == "No") %>% 
+   left_join(true_coef_data)
+
+
+
+truth_res2 %>% group_by(significant) %>% dplyr::summarize(n=n())
+
+adj_formula = "~V1 + V2 + V3 + V4 + V5"
+#adj_formula = "~V1 + V2 + V3"
+# pattern to allow one row to have multiple missing variables. First get all combos of 0 or 1 for the 2 variables
+pattern_vars = expand.grid(0:1, 0:1, 0:1, 0:1)
+# then add back the predictor of interest, which is never amputed, so the first col =1 the whole way down
+pattern2 = matrix(1, nrow = nrow(pattern_vars), ncol = 1)
+pattern1 = cbind(pattern2, pattern_vars)
+#remove last row which is all 1s (all 1s means no missingness induced)
+pattern1 = pattern1[1:15,]
+mat = alldg_ampute
+
+
+saveRDS(alldg_ampute, "alldg_ampute50.RDS")
+saveRDS(data, "data50.RDS")
+saveRDS(new_coefs, "new_coefs50.RDS")
+```
+

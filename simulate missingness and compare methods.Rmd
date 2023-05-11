@@ -1,0 +1,484 @@
+---
+title: "Untitled"
+output: html_document
+date: "2023-04-27"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(tidyverse)
+library(mice)
+library(edgeR)
+library(openxlsx)
+library(BiocStyle)
+library(xtable)
+library(tximport)
+library(Glimma)
+library(org.Hs.eg.db)
+library(doParallel)
+library(foreach)
+library(RNAseqCovarImpute)
+library(doRNG)
+library(seqgendiff)
+library(simstudy)
+library(missForest)
+
+# formula for voom
+adj_formula = "~V1 + V2 + V3 + V4 + V5"
+# pattern to allow one row to have multiple missing variables. First get all combos of 0 or 1 for the 2 variables
+pattern_vars = expand.grid(0:1, 0:1, 0:1, 0:1)
+# then add back the predictor of interest, which is never amputed, so the first col =1 the whole way down
+pattern2 = matrix(1, nrow = nrow(pattern_vars), ncol = 1)
+pattern1 = cbind(pattern2, pattern_vars)
+#remove last row which is all 1s (all 1s means no missingness induced)
+pattern1 = pattern1[1:15,]
+
+
+simulation2 <- function(data, mat, voom_formula, predictor, miss_mech, prop_miss, pattern, sample_size) {
+RNGkind("L'Ecuyer-CMRG")
+mcoptions = list(mc.set.seed = TRUE)
+myCluster <- makeCluster(10, # number of cores to use
+                         type = "PSOCK") # type of cluster
+registerDoParallel(myCluster)
+
+all_coef_se = foreach(i = 1:10, .options.multicore=mcoptions) %dorng% {
+  
+  library(tidyverse)
+  library(mice)
+  library(edgeR)
+  library(openxlsx)
+  library(BiocStyle)
+  library(xtable)
+  library(tximport)
+  library(Glimma)
+  library(org.Hs.eg.db)
+  library(doParallel)
+  library(foreach)
+  library(RNAseqCovarImpute)
+  library(missForest)
+
+#V1 = data %>% dplyr::select(!!predictor)
+#ampute_this = data %>% dplyr::select(-!!predictor)
+result <- ampute(data = data, prop = prop_miss, mech = miss_mech, patterns = pattern)
+
+ampute_i = result$amp
+intervals = get_gene_bin_intervals(mat, ampute_i)
+
+  
+imputed_data_list = impute_by_gene_bin(data = ampute_i, intervals = intervals, DGE = mat, m = 10)
+
+  coef_se = limmavoom_imputed_data_list(gene_intervals = intervals, DGE = mat, imputed_data_list = imputed_data_list, m = 10, voom_formula =voom_formula, predictor = "V1")
+  
+  
+  data_si = ampute_i
+  data_si = missForest(data_si)
+  data_si = data_si$ximp
+  output2 = list(coef_se, imputed_data_list, data_si)
+
+}
+########## Rubins
+#all_coef_se = list(output2)
+rubins_res = foreach(i = 1:10) %do% {
+  all_coef_se_i = all_coef_se[[i]][[1]]
+  rubins_res=combine_rubins(DGE = mat, model_results = all_coef_se_i, voom_formula =voom_formula)
+}
+
+
+truth_vs_impute = foreach(i = 1:as.numeric(length(rubins_res))) %do% {
+  
+  # simulated missing data then imputation model
+  rubins_res_i = rubins_res[[i]] 
+  is_null_gene = truth_res2$significant == "No"
+  # add together with true model. join by gene
+  both_models = truth_res2 %>% dplyr::select(-significant) %>% 
+    left_join(rubins_res_i) %>% 
+      dplyr::rename(p_adj = combined_p_adj_bayes) %>% 
+    mutate(significant = ifelse(p_adj<0.05, "Yes", "No"))
+
+  # error compared to the true coefs that we made, where 90% are forced null
+  true_number = both_models %>% dplyr::filter(true_coef != 0) %>% nrow() %>%  as.numeric()
+  true_identified = both_models %>% dplyr::filter(true_coef != 0) %>% dplyr::filter(significant == "Yes") %>% nrow() %>%  as.numeric()
+  false_pos = both_models %>% dplyr::filter(significant == "Yes") %>% dplyr::filter(true_coef == 0) %>% nrow() %>% as.numeric()
+  total_pos = both_models %>% dplyr::filter(significant == "Yes") %>% nrow() %>% as.numeric()
+  
+  # Error for coefs with effect size at least 10% 
+  # No false pos calculation here because we defined coef=0 as null genes. 
+  
+  error_summary = tibble(prop_true_identifed = true_identified/true_number,
+                  false_pos_ratio = false_pos/total_pos) %>% 
+    mutate(Method = "RNAseqCovarImpute",
+           Predictor = colnames(all_coef_se[[1]][[3]])[1])
+  
+  # comapred to limma voom model verifying the coefs
+  true_number = both_models %>% dplyr::filter(null == FALSE) %>% nrow() %>%  as.numeric()
+  true_identified = both_models %>% dplyr::filter(null == FALSE) %>% dplyr::filter(significant == "Yes") %>% nrow() %>%  as.numeric()
+  false_pos = both_models %>% dplyr::filter(significant == "Yes") %>% dplyr::filter(null == TRUE) %>% nrow() %>% as.numeric()
+  total_pos = both_models %>% dplyr::filter(significant == "Yes") %>% nrow() %>% as.numeric()
+  
+  error_other = tibble(prop_true_identifed = true_identified/true_number,
+                  false_pos_ratio = false_pos/total_pos) %>% 
+    mutate(Method = "RNAseqCovarImpute",
+           Predictor = colnames(all_coef_se[[1]][[3]])[1])
+  
+  coefs = both_models %>% dplyr::select(ENSEMBL, coef_combined, coef_verify, null, significant)
+  
+  output = list(error = error_summary,
+                coefs = coefs,
+                error_other = error_other)
+  
+}
+
+savename1 = paste0("./plot_data/contin_truth_vs_impute_syn_",miss_mech, "_", predictor, "_", as.character(prop_miss), "_synthetic_data_10_cor_2000_genes_", sample_size)
+
+saveRDS(truth_vs_impute, savename1)
+
+truth_vs_cc = foreach(i = 1:as.numeric(length(rubins_res))) %do% {
+  
+  # Get the ith amputation and make a complete case dataset by droppping NAs
+  ampute_i = complete(all_coef_se[[i]][[2]][[1]],0) %>% dplyr::select(-starts_with("ENS"))%>% 
+    mutate(pathways_id = colnames(mat)) %>%
+    drop_na()
+  # Run limma-voom
+  alldg_i = mat[, ampute_i$pathways_id]
+  design1 <- model.matrix(as.formula(voom_formula), ampute_i)
+  fit1 <- eBayes(voomLmFit(alldg_i, design1))
+  top.table1 <- topTable(fit1 ,coef = "V1",sort.by = "P", n = Inf)
+
+  
+  both_models = truth_res2 %>% dplyr::select(-significant) %>% 
+    left_join(top.table1) %>% 
+    mutate(significant = ifelse(adj.P.Val<0.05, "Yes", "No"))
+  
+  
+  # Error
+  true_number = both_models %>% dplyr::filter(true_coef != 0) %>% nrow() %>%  as.numeric()
+  true_identified = both_models %>% dplyr::filter(true_coef != 0) %>% dplyr::filter(significant == "Yes") %>% nrow() %>%  as.numeric()
+  false_pos = both_models %>% dplyr::filter(significant == "Yes") %>% dplyr::filter(true_coef == 0) %>% nrow() %>% as.numeric()
+  total_pos = both_models %>% dplyr::filter(significant == "Yes") %>% nrow() %>% as.numeric()
+  
+  error_summary = tibble(prop_true_identifed = true_identified/true_number,
+                  false_pos_ratio = false_pos/total_pos) %>% 
+    mutate(Method = "Complete case",
+           Predictor = colnames(all_coef_se[[1]][[3]])[1]) 
+  
+  # comapred to limma voom model verifying the coefs
+  true_number = both_models %>% dplyr::filter(null == FALSE) %>% nrow() %>%  as.numeric()
+  true_identified = both_models %>% dplyr::filter(null == FALSE) %>% dplyr::filter(significant == "Yes") %>% nrow() %>%  as.numeric()
+  false_pos = both_models %>% dplyr::filter(significant == "Yes") %>% dplyr::filter(null == TRUE) %>% nrow() %>% as.numeric()
+  total_pos = both_models %>% dplyr::filter(significant == "Yes") %>% nrow() %>% as.numeric()
+  
+  error_other = tibble(prop_true_identifed = true_identified/true_number,
+                  false_pos_ratio = false_pos/total_pos) %>% 
+    mutate(Method = "Complete case",
+           Predictor = colnames(all_coef_se[[1]][[3]])[1])
+
+
+
+  
+
+  
+  
+  # Get single imputation model
+  data_si = all_coef_se[[i]][[3]] %>% 
+    mutate(pathways_id = colnames(mat))
+  # Run limma-voom
+  alldg_si = mat[, data_si$pathways_id]
+  design_si <- model.matrix(as.formula(voom_formula), data_si)
+  fit_si <- eBayes(voomLmFit(alldg_si, design_si))
+  top.table_si <- topTable(fit_si ,coef = "V1",sort.by = "P", n = Inf)
+  
+  both_models_si = truth_res2 %>% dplyr::select(-significant)  %>% 
+    left_join(top.table_si) %>% 
+    mutate(significant = ifelse(adj.P.Val<0.05, "Yes", "No"))
+  
+  # Error
+  true_number = both_models_si %>% dplyr::filter(true_coef != 0) %>% nrow() %>%  as.numeric()
+  true_identified = both_models_si %>% dplyr::filter(true_coef != 0) %>% dplyr::filter(significant == "Yes") %>% nrow() %>%  as.numeric()
+  false_pos = both_models_si %>% dplyr::filter(significant == "Yes") %>% dplyr::filter(true_coef == 0) %>% nrow() %>% as.numeric()
+  total_pos = both_models_si %>% dplyr::filter(significant == "Yes") %>% nrow() %>% as.numeric()
+  
+  
+  error_summary_si = tibble(prop_true_identifed = true_identified/true_number,
+                  false_pos_ratio = false_pos/total_pos)%>% 
+    mutate(Method = "Single imputation",
+           Predictor = colnames(all_coef_se[[1]][[3]])[1])
+  
+    # error other
+  true_number = both_models_si %>% dplyr::filter(null == FALSE) %>% nrow() %>%  as.numeric()
+  true_identified = both_models_si %>% dplyr::filter(null == FALSE) %>% dplyr::filter(significant == "Yes") %>% nrow() %>%  as.numeric()
+  false_pos = both_models_si %>% dplyr::filter(significant == "Yes") %>% dplyr::filter(null == TRUE) %>% nrow() %>% as.numeric()
+  total_pos = both_models_si %>% dplyr::filter(significant == "Yes") %>% nrow() %>% as.numeric()
+  
+    error_other_si = tibble(prop_true_identifed = true_identified/true_number,
+                  false_pos_ratio = false_pos/total_pos)%>% 
+    mutate(Method = "Single imputation",
+           Predictor = colnames(all_coef_se[[1]][[3]])[1])
+
+  coefs_si = both_models_si %>% dplyr::select(ENSEMBL, logFC, coef_verify) %>%
+    dplyr::rename(logFC_si = logFC,
+                  coef_verify_si = coef_verify)
+  coefs = both_models %>% dplyr::select(ENSEMBL, logFC, coef_verify, null, significant) %>% left_join(coefs_si)
+  
+  output = list(error = error_summary,
+                error_si = error_summary_si,
+                coefs = coefs,
+                error_other = error_other,
+                error_other_si = error_other_si)
+  
+}
+
+
+
+
+
+savename2 = paste0("./plot_data/contin_truth_vs_cc_syn_",miss_mech, "_", predictor, "_", as.character(prop_miss), "_synthetic_data_10_cor_2000_genes_", sample_size)
+saveRDS(truth_vs_cc, savename2) 
+}
+
+```
+
+```{r}
+alldg_ampute = readRDS("alldg_ampute50.RDS")
+data = readRDS("data50.RDS")
+new_coefs = readRDS("new_coefs50.RDS")
+# New design that has an intercept
+new_design = model.matrix(~V1 + V2 + V3 + V4 + V5, data)
+#new_design = model.matrix(~V1 + V2 + V3, data)
+
+# Use limma-voom to get what we define as the true coefficients and true significantly differentially expressed genes
+vout <- limma::voom(alldg_ampute, design = new_design)
+lout <- limma::lmFit(vout)
+coefhat <- coef(lout)[, -1, drop = FALSE]
+eout <- eBayes(lout)
+top.table1 <- topTable(eout ,coef = "V1",sort.by = "P", n = Inf)%>% 
+  mutate(significant = ifelse(adj.P.Val<0.05, "Yes", "No"))
+
+
+true_coef_data = tibble(ENSEMBL = rownames(alldg_ampute),
+                 true_coef = new_coefs[,1])
+
+truth_res2 = tibble(ENSEMBL = rownames(top.table1),
+                 coef_verify = top.table1$logFC,
+                 significant = top.table1$significant) %>% 
+  mutate(null = significant == "No") %>% 
+   left_join(true_coef_data)
+
+
+
+time1 = Sys.time()
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 5, pattern = pattern1, sample_size = 50)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 15, pattern = pattern1, sample_size = 50)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 25, pattern = pattern1, sample_size = 50)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 35, pattern = pattern1, sample_size = 50)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 45, pattern = pattern1, sample_size = 50)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 55, pattern = pattern1, sample_size = 50)
+time2 = Sys.time()
+print(time2-time1)
+
+time1 = Sys.time()
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 5, pattern = pattern1, sample_size = 50)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 15, pattern = pattern1, sample_size = 50)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 25, pattern = pattern1, sample_size = 50)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 35, pattern = pattern1, sample_size = 50)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 45, pattern = pattern1, sample_size = 50)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 55, pattern = pattern1, sample_size = 50)
+time2 = Sys.time()
+print(time2-time1)
+```
+
+100
+```{r}
+alldg_ampute = readRDS("alldg_ampute100.RDS")
+data = readRDS("data100.RDS")
+new_coefs = readRDS("new_coefs100.RDS")
+
+# New design that has an intercept
+new_design = model.matrix(~V1 + V2 + V3 + V4 + V5, data)
+#new_design = model.matrix(~V1 + V2 + V3, data)
+
+# Use limma-voom to get what we define as the true coefficients and true significantly differentially expressed genes
+vout <- limma::voom(alldg_ampute, design = new_design)
+lout <- limma::lmFit(vout)
+coefhat <- coef(lout)[, -1, drop = FALSE]
+eout <- eBayes(lout)
+top.table1 <- topTable(eout ,coef = "V1",sort.by = "P", n = Inf)%>% 
+  mutate(significant = ifelse(adj.P.Val<0.05, "Yes", "No"))
+
+
+true_coef_data = tibble(ENSEMBL = rownames(alldg_ampute),
+                 true_coef = new_coefs[,1])
+
+truth_res2 = tibble(ENSEMBL = rownames(top.table1),
+                 coef_verify = top.table1$logFC,
+                 significant = top.table1$significant) %>% 
+  mutate(null = significant == "No") %>% 
+   left_join(true_coef_data)
+
+time1 = Sys.time()
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 5, pattern = pattern1, sample_size = 100)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 15, pattern = pattern1, sample_size = 100)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 25, pattern = pattern1, sample_size = 100)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 35, pattern = pattern1, sample_size = 100)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 45, pattern = pattern1, sample_size = 100)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 55, pattern = pattern1, sample_size = 100)
+time2 = Sys.time()
+print(time2-time1)
+
+time1 = Sys.time()
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 5, pattern = pattern1, sample_size = 100)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 15, pattern = pattern1, sample_size = 100)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 25, pattern = pattern1, sample_size = 100)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 35, pattern = pattern1, sample_size = 100)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 45, pattern = pattern1, sample_size = 100)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 55, pattern = pattern1, sample_size = 100)
+time2 = Sys.time()
+print(time2-time1)
+```
+
+200
+```{r}
+alldg_ampute = readRDS("alldg_ampute200.RDS")
+data = readRDS("data200.RDS")
+new_coefs = readRDS("new_coefs200.RDS")
+
+# New design that has an intercept
+new_design = model.matrix(~V1 + V2 + V3 + V4 + V5, data)
+#new_design = model.matrix(~V1 + V2 + V3, data)
+
+# Use limma-voom to get what we define as the true coefficients and true significantly differentially expressed genes
+vout <- limma::voom(alldg_ampute, design = new_design)
+lout <- limma::lmFit(vout)
+coefhat <- coef(lout)[, -1, drop = FALSE]
+eout <- eBayes(lout)
+top.table1 <- topTable(eout ,coef = "V1",sort.by = "P", n = Inf)%>% 
+  mutate(significant = ifelse(adj.P.Val<0.05, "Yes", "No"))
+
+
+true_coef_data = tibble(ENSEMBL = rownames(alldg_ampute),
+                 true_coef = new_coefs[,1])
+
+truth_res2 = tibble(ENSEMBL = rownames(top.table1),
+                 coef_verify = top.table1$logFC,
+                 significant = top.table1$significant) %>% 
+  mutate(null = significant == "No") %>% 
+   left_join(true_coef_data)
+
+time1 = Sys.time()
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 5, pattern = pattern1, sample_size = 200)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 15, pattern = pattern1, sample_size = 200)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 25, pattern = pattern1, sample_size = 200)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 35, pattern = pattern1, sample_size = 200)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 45, pattern = pattern1, sample_size = 200)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 55, pattern = pattern1, sample_size = 200)
+time2 = Sys.time()
+print(time2-time1)
+
+time1 = Sys.time()
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 5, pattern = pattern1, sample_size = 200)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 15, pattern = pattern1, sample_size = 200)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 25, pattern = pattern1, sample_size = 200)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 35, pattern = pattern1, sample_size = 200)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 45, pattern = pattern1, sample_size = 200)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 55, pattern = pattern1, sample_size = 200)
+time2 = Sys.time()
+print(time2-time1)
+```
+
+500
+```{r}
+alldg_ampute = readRDS("alldg_ampute500.RDS")
+data = readRDS("data500.RDS")
+new_coefs = readRDS("new_coefs500.RDS")
+
+# New design that has an intercept
+new_design = model.matrix(~V1 + V2 + V3 + V4 + V5, data)
+#new_design = model.matrix(~V1 + V2 + V3, data)
+
+# Use limma-voom to get what we define as the true coefficients and true significantly differentially expressed genes
+vout <- limma::voom(alldg_ampute, design = new_design)
+lout <- limma::lmFit(vout)
+coefhat <- coef(lout)[, -1, drop = FALSE]
+eout <- eBayes(lout)
+top.table1 <- topTable(eout ,coef = "V1",sort.by = "P", n = Inf)%>% 
+  mutate(significant = ifelse(adj.P.Val<0.05, "Yes", "No"))
+
+
+true_coef_data = tibble(ENSEMBL = rownames(alldg_ampute),
+                 true_coef = new_coefs[,1])
+
+truth_res2 = tibble(ENSEMBL = rownames(top.table1),
+                 coef_verify = top.table1$logFC,
+                 significant = top.table1$significant) %>% 
+  mutate(null = significant == "No") %>% 
+   left_join(true_coef_data)
+
+time1 = Sys.time()
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 5, pattern = pattern1, sample_size = 500)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 15, pattern = pattern1, sample_size = 500)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 25, pattern = pattern1, sample_size = 500)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 35, pattern = pattern1, sample_size = 500)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 45, pattern = pattern1, sample_size = 500)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MAR", prop_miss = 55, pattern = pattern1, sample_size = 500)
+time2 = Sys.time()
+print(time2-time1)
+
+time1 = Sys.time()
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 5, pattern = pattern1, sample_size = 500)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 15, pattern = pattern1, sample_size = 500)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 25, pattern = pattern1, sample_size = 500)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 35, pattern = pattern1, sample_size = 500)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 45, pattern = pattern1, sample_size = 500)
+set.seed(2023)
+simulation2(data = data, mat = alldg_ampute, voom_formula = adj_formula, predictor = "V1", miss_mech = "MCAR", prop_miss = 55, pattern = pattern1, sample_size = 500)
+time2 = Sys.time()
+print(time2-time1)
+```
+
